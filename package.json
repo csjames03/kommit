@@ -1,0 +1,28 @@
+{
+  "name": "kommit",
+  "productName": "Kommit",
+  "version": "0.1.0",
+  "description": "Desktop task board that hands your tasks to Claude Code and walks them through plan, build, review, test, docs and update.",
+  "main": "out/main/index.js",
+  "author": "james_87b0",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.2.3",
+    "electron-vite": "^6.0.0",
+    "vite": "^8.3.7"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  }
+}
