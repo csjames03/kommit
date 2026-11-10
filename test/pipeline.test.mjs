@@ -7,8 +7,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createStore, migrate } from '../src/main/store.js'
-import { createPipeline, branchFor } from '../src/main/pipeline.js'
-import { parseToolList } from '../src/main/prompts.js'
+import { createPipeline, branchFor, envName, maxAttempts } from '../src/main/pipeline.js'
+import { parseToolList, exitLabel } from '../src/main/prompts.js'
 import { toLogEntries } from '../src/main/claude.js'
 
 // Each test uses its own temp repos, so they can run in parallel (git is slow on Windows).
@@ -70,7 +70,8 @@ function setup({
   reviews = [],
   maxAttempts = 3,
   task: taskInput = {},
-  versions = []
+  versions = [],
+  integration
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-test-'))
   const store = createStore(path.join(root, 'data'))
@@ -87,7 +88,13 @@ function setup({
   let sessionTotal = 0
   let builds = 0
   let reviewsSeen = 0
-  const project = store.addProject({ name: 'ws', repos: repoDefs, versions, maxAttempts })
+  const project = store.addProject({
+    name: 'ws',
+    repos: repoDefs,
+    versions,
+    maxAttempts,
+    integration: typeof integration === 'function' ? integration(root.replace(/\\/g, '/')) : integration
+  })
   const deps = {
     runClaude(opts) {
       const stage = stageOf(opts.prompt)
@@ -322,6 +329,114 @@ test('a repo with tests turned off is skipped, not failed', async () => {
   const t = await run()
   assert.equal(t.status, 'done', t.error)
   assert.equal(t.outputs.test.repos[0].skipped, true)
+})
+
+// Integration commands are small node scripts; markers record that before/after ran.
+const node = (js) => `node -e "${js}"`
+const mark = (file) => node(`require('fs').appendFileSync('${file}','x')`)
+const markCount = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').length : 0)
+const twoRepos = [{ name: 'backend' }, { name: 'client-view' }]
+const buildBoth = (cwd) => {
+  fs.writeFileSync(path.join(cwd, 'backend', 'route.js'), 'GET /x\n')
+  fs.writeFileSync(path.join(cwd, 'client-view', 'call.js'), 'fetch(x)\n')
+}
+
+test('integration tests run after repo tests, see every repo, and before/after wrap them', async () => {
+  let root
+  const { run, calls } = setup({
+    repos: twoRepos,
+    build: buildBoth,
+    integration: (r) => {
+      root = r
+      return {
+        command: node(
+          "const e=process.env,fs=require('fs');process.exit(fs.existsSync(e.KOMMIT_REPO_BACKEND+'/route.js')&&fs.existsSync(e.KOMMIT_REPO_CLIENT_VIEW+'/call.js')&&e.KOMMIT_CHANGED_REPOS.split(',').length===2?0:1)"
+        ),
+        beforeCommand: mark(`${r}/before.txt`),
+        afterCommand: mark(`${r}/after.txt`),
+        testsRepoId: 'client-view-id'
+      }
+    }
+  })
+  const t = await run()
+  assert.equal(t.status, 'done', t.error)
+  assert.equal(t.outputs.test.integration.passed, true)
+  assert.equal(markCount(`${root}/before.txt`), 1)
+  assert.equal(markCount(`${root}/after.txt`), 1)
+  const build = calls.find((c) => c.stage === 'build').opts.prompt
+  assert.match(build, /## Integration tests/)
+  assert.match(build, /End-to-end tests live in "client-view"/)
+})
+
+test('failing integration tests go back to build, cleanup always runs, then it passes', async () => {
+  let root
+  const { run, calls } = setup({
+    repos: twoRepos,
+    build: (cwd, n) => {
+      buildBoth(cwd)
+      if (n === 2) fs.writeFileSync(path.join(cwd, 'backend', 'fixed.txt'), 'ok\n')
+    },
+    integration: (r) => {
+      root = r
+      return {
+        command: node("process.exit(require('fs').existsSync(process.env.KOMMIT_REPO_BACKEND+'/fixed.txt')?0:3)"),
+        afterCommand: mark(`${r}/after.txt`)
+      }
+    }
+  })
+  const t = await run()
+  assert.equal(t.status, 'done', t.error)
+  assert.equal(t.attempts, 1)
+  assert.match(calls.filter((c) => c.stage === 'build')[1].opts.prompt, /integration tests failed[\s\S]*exited with code 3/)
+  assert.equal(markCount(`${root}/after.txt`), 2) // cleanup ran after the failure too
+})
+
+test('a failing "before" command counts as an integration failure and still cleans up', async () => {
+  let root
+  const { run, calls } = setup({
+    repos: twoRepos,
+    build: buildBoth,
+    maxAttempts: 0,
+    integration: (r) => {
+      root = r
+      return { command: PASS, beforeCommand: node('process.exit(7)'), afterCommand: mark(`${r}/after.txt`) }
+    }
+  })
+  const t = await run()
+  assert.equal(t.status, 'failed')
+  assert.match(t.error, /Integration tests failed/)
+  assert.equal(t.outputs.test.integration.beforeFailed, true)
+  assert.equal(markCount(`${root}/after.txt`), 1)
+  assert.equal(calls.filter((c) => c.stage === 'build').length, 1)
+})
+
+test('"only when 2+ repos change" skips integration for a one-repo change', async () => {
+  const { run } = setup({
+    repos: twoRepos,
+    planRepos: ['backend'],
+    build: (cwd) => fs.writeFileSync(path.join(cwd, 'backend', 'route.js'), 'x\n'),
+    integration: { command: node('process.exit(1)'), runWhen: 'multi' }
+  })
+  const t = await run()
+  assert.equal(t.status, 'done', t.error)
+  assert.equal(t.outputs.test.integration.skipped, true)
+})
+
+test('max fix attempts: 0 means no retries, missing means 3', () => {
+  assert.equal(maxAttempts({ maxAttempts: 0 }), 0)
+  assert.equal(maxAttempts({ maxAttempts: '2' }), 2)
+  assert.equal(maxAttempts({}), 3)
+  assert.equal(maxAttempts({ maxAttempts: 'abc' }), 3)
+})
+
+test('Windows crash exit codes are shown readably', () => {
+  assert.equal(exitLabel(1), '1')
+  assert.equal(exitLabel(3221226505), '0xC0000409 (the process crashed)')
+})
+
+test('envName turns repo names into env-var-safe names', () => {
+  assert.equal(envName('client-view'), 'CLIENT_VIEW')
+  assert.equal(envName('my repo.v2'), 'MY_REPO_V2')
 })
 
 test('requested changes send the task back to build with the feedback', async () => {

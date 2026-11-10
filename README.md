@@ -17,6 +17,7 @@
 - [Workspaces: several repos, one task](#workspaces-several-repos-one-task)
 - [Versions and release branches](#versions-and-release-branches)
 - [Tests are mandatory](#tests-are-mandatory)
+- [Integration tests](#integration-tests)
 - [Requirements](#requirements)
 - [Getting started](#getting-started)
 - [Using Kommit](#using-kommit)
@@ -42,6 +43,7 @@ Coding agents are good at writing code, but a real task needs more: a plan, chan
 - **Autonomous pipeline:** every task goes through Plan, Build, Code review, Test, Docs and Update. Failed reviews, failing tests and merge conflicts send the task back to Build with the exact feedback, up to a retry limit you set.
 - **Independent code review:** the reviewer is a *fresh* Claude session that sees the real diff, not the developer session's own summary.
 - **Real test gate:** Kommit runs each repo's test command itself. Only exit code 0 counts.
+- **Integration tests across repos:** an optional workspace-level end-to-end suite (e.g. `docker compose` + Playwright) runs after each repo's own tests, with before and after hooks and env vars pointing at every repo.
 - **Tests are always required:** if a repo has no tests, Claude sets up a test setup that fits the stack and writes tests suited to the change (unit, API, security, UI, accessibility).
 - **Multi-repo workspaces:** group `client`, `backend` and `platform` repos. One Claude session sees all of them, the planner picks which repos to change, and it defines the contract between them so both sides match.
 - **Versions:** each version maps to a release branch per repo (`release/2.3` by default). Task branches start from it, stay in sync with it, and merge back into it with one click or automatically.
@@ -76,7 +78,7 @@ Coding agents are good at writing code, but a real task needs more: a plan, chan
 | **Plan** | Claude (read-only) | Explores every repo in scope. Decides which repos must change, defines the **contract** between them (routes, payloads, shared types), lists steps, risks and the tests to write. |
 | **Build** | Claude (same session) | Implements the plan and its tests across the affected repos. If a repo has no test setup, it creates one and reports the command. |
 | **Code review** | A fresh Claude session (read-only) | Reads the real diff of every repo. Checks correctness, security, test coverage, and that every repo matches the contract. Blocker or major issues send the task back to Build. |
-| **Test** | Kommit | Commits a checkpoint, merges the latest base or version branch into the task branch, then runs each changed repo's test command. Conflicts are handed to Claude to resolve. |
+| **Test** | Kommit | Commits a checkpoint, merges the latest base or version branch into the task branch, runs each changed repo's test command, then the workspace [integration tests](#integration-tests) if configured. Conflicts are handed to Claude to resolve. |
 | **Docs** | Claude | Updates README, docs, comments or CHANGELOG where the change needs it, and changes nothing otherwise. |
 | **Update** | Claude + Kommit | Claude writes a status update and a commit message. Kommit squashes the work into **one commit per changed repo** on the task branch. |
 | **Merge** | You, or auto | Merges the task branch into the version branch in every repo, all or nothing. |
@@ -145,6 +147,37 @@ A task can't complete without passing tests in every repo it changed.
 - **Kinds of tests:** Claude is told to write the kinds that fit the work: unit tests, API/backend tests, security tests (bad input, injection attempts, unauthorized access), UI tests, and accessibility and usability checks.
 - **Review:** missing or weak tests count as a major issue.
 - **Opt-out:** turn on **Skip tests for this repo** (Workspace settings → Advanced) for docs-only or config-only repos.
+
+## Integration tests
+
+Unit tests prove each repo works on its own. Integration tests prove the repos work **together**. Turn them on in **Workspace settings → Integration tests**.
+
+| Field | Example | Meaning |
+|---|---|---|
+| Command | `npx playwright test` | The end-to-end suite. Must exit 0 for the task to complete. Leave blank to turn integration tests off. |
+| Before | `docker compose up -d --build` | Optional. Runs before every integration run (start services, build). If it fails, the run counts as an integration failure. |
+| After | `docker compose down` | Optional. **Always** runs afterwards, even when tests fail or the task is stopped. |
+| Run from | Task folder | The task folder (every repo side by side) or one repo's folder |
+| End-to-end tests live in | `client-view` | Where Claude should add or update end-to-end tests when a change crosses repos or forms a user flow |
+| Run | For every task | Or *only when 2+ repos change*, to save time on single-repo tasks |
+| Timeout | 20 min | Per command |
+
+**When it runs:** in the Test stage, after every changed repo's own tests pass. A failure sends the task back to Build with the output, like any other test failure. The results appear under **Tests → Integration tests**.
+
+**Environment variables** passed to the before, command and after steps:
+
+| Variable | Value |
+|---|---|
+| `KOMMIT_TASK_DIR` | The task folder |
+| `KOMMIT_REPO_<NAME>` | Each repo's folder for this task (its worktree, or the repo itself if it isn't part of the task). `client-view` becomes `KOMMIT_REPO_CLIENT_VIEW`. |
+| `KOMMIT_CHANGED_REPOS` | Comma-separated names of the repos this task changed |
+| `KOMMIT_VERSION` | The task's version name, or empty |
+| `KOMMIT_TASK_NUMBER` | The task number |
+| `CI` | `true` |
+
+For example, a `docker-compose.yml` can build from `${KOMMIT_REPO_BACKEND}` and `${KOMMIT_REPO_CLIENT_VIEW}`, so the containers run this task's code instead of `main`.
+
+Windows crash exit codes are shown readably (e.g. `0xC0000409 (the process crashed)`), so a crashing script isn't mistaken for a failing assertion.
 
 ## Requirements
 
@@ -216,7 +249,8 @@ Task actions: **Start**, **Stop**, **Resume from \<stage\>**, **Update & retest*
 | Setup command | Per repo. Runs once in a new worktree before tests (e.g. `npm install`, since worktrees start without `node_modules`). |
 | Skip tests for this repo | Per repo. For docs-only or config-only repos. |
 | Workspace notes | Context sent to Claude with every stage |
-| Max fix attempts | How many times a task may go back to Build before it fails (default 3) |
+| Integration tests | Workspace-level end-to-end suite. See [Integration tests](#integration-tests). |
+| Max fix attempts | How many times a task may go back to Build before it fails (default 3; 0 means no retries) |
 | Model | Optional `--model` override, e.g. `sonnet` or `opus` |
 | Allowed tools | Tools Claude may use while building, e.g. `Read Edit Write Bash(npm *)`. Anything else is denied. |
 
@@ -314,6 +348,8 @@ The test suite runs the **real pipeline against real git repositories** created 
 - auto-merge
 - review rejections, failing tests, missing tests, and repos with tests turned off
 - test commands set up by Claude and saved on merge
+- integration tests: env vars, before and after hooks (after always runs), failure then fix, setup failures, the "2+ repos" rule
+- max fix attempts of 0, and readable crash exit codes
 - restart from scratch
 - cost accounting for resumed sessions
 - log formatting
@@ -342,7 +378,7 @@ Every Claude stage is a Claude Code session, billed to whatever account `claude`
 
 - The Windows installer is unsigned, and there's no auto-update yet. Rebuild and reinstall to update.
 - Pushing branches and opening pull requests is intentionally manual for now.
-- Possible next steps: PR creation, an integration-test command per workspace, per-stage model selection, code signing and auto-update.
+- Possible next steps: PR creation, task import (pasted lists or GitHub Issues), cost and time budgets with per-stage models, code signing and auto-update.
 
 ## License
 

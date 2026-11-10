@@ -4,6 +4,7 @@ import Markdown from './Markdown.jsx'
 import Icon from './Icon.jsx'
 
 const api = window.api
+const exitLabel = (c) => (typeof c === 'number' && c >= 0xc0000000 ? `0x${c.toString(16).toUpperCase()}, crashed` : c)
 const cleanError = (e) => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
 
 export default function TaskDetail({ task, project, onClose, onEdit, onRemove, onTaskChange }) {
@@ -341,7 +342,7 @@ function TestView({ test }) {
           <div className="row-between">
             <h3>{r.name}</h3>
             <span className={`badge ${r.skipped ? 'stopped' : r.passed ? 'done' : 'failed'}`}>
-              {r.skipped ? 'Skipped' : r.passed ? 'Passed' : `Failed (exit ${r.code})`}
+              {r.skipped ? 'Skipped' : r.passed ? 'Passed' : `Failed (exit ${exitLabel(r.code)})`}
             </span>
           </div>
           {r.skipped ? (
@@ -354,7 +355,35 @@ function TestView({ test }) {
           )}
         </section>
       ))}
+      {test.integration && <IntegrationResult r={test.integration} />}
     </div>
+  )
+}
+
+function IntegrationResult({ r }) {
+  const secs = r.durationMs ? ` · ${Math.round(r.durationMs / 1000)}s` : ''
+  const label = r.skipped ? 'Skipped' : r.passed ? 'Passed' : r.beforeFailed ? `Setup failed (exit ${exitLabel(r.code)})` : `Failed (exit ${exitLabel(r.code)}${r.timedOut ? ', timed out' : ''})`
+  return (
+    <section className="test-repo integration-result">
+      <div className="row-between">
+        <h3>
+          <Icon name="grid" size={13} /> Integration tests
+        </h3>
+        <span className={`badge ${r.skipped ? 'stopped' : r.passed ? 'done' : 'failed'}`}>{label}</span>
+      </div>
+      {r.skipped ? (
+        <p className="muted">Only runs when 2 or more repos change. This task changed one.</p>
+      ) : (
+        <>
+          <p className="mono small muted">
+            {r.beforeCommand ? `${r.beforeCommand}  →  ` : ''}
+            {r.command}
+            {secs}
+          </p>
+          <pre className="output">{r.output || '(no output)'}</pre>
+        </>
+      )}
+    </section>
   )
 }
 

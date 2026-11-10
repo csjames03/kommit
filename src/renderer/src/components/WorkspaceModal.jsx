@@ -52,8 +52,9 @@ export default function WorkspaceModal({ project, onSave, onRemove, onClose }) {
       {
         ...f,
         name: f.name.trim(),
-        maxAttempts: Number(f.maxAttempts) || 3,
-        repos: repos.map(({ isGit, ...r }) => ({ ...r, name: r.name.trim() }))
+        maxAttempts: f.maxAttempts === '' || !Number.isFinite(Number(f.maxAttempts)) ? 3 : Math.max(0, Math.floor(Number(f.maxAttempts))),
+        repos: repos.map(({ isGit, ...r }) => ({ ...r, name: r.name.trim() })),
+        integration: cleanIntegration(f.integration, repos)
       },
       project?.id
     )
@@ -165,6 +166,12 @@ export default function WorkspaceModal({ project, onSave, onRemove, onClose }) {
         <textarea rows={3} value={f.notes || ''} onChange={set('notes')} placeholder="client-view calls backend's REST API. platform holds shared types. Never edit .env files." />
       </Field>
 
+      <IntegrationSection
+        value={f.integration || {}}
+        repos={repos}
+        onChange={(patch) => setF((x) => ({ ...x, integration: { ...(x.integration || {}), ...patch } }))}
+      />
+
       <button className="link" onClick={() => setAdvanced((a) => !a)}>
         <Icon name={advanced ? 'chevronDown' : 'chevronRight'} size={14} /> Advanced
       </button>
@@ -184,5 +191,96 @@ export default function WorkspaceModal({ project, onSave, onRemove, onClose }) {
         </>
       )}
     </Modal>
+  )
+}
+
+// Drop references to repos that were removed, and trim the commands.
+function cleanIntegration(integ = {}, repos) {
+  const ids = new Set(repos.map((r) => r.id))
+  const t = (s) => (s || '').trim()
+  return {
+    command: t(integ.command),
+    beforeCommand: t(integ.beforeCommand),
+    afterCommand: t(integ.afterCommand),
+    cwd: integ.cwd && integ.cwd !== 'task' && ids.has(integ.cwd) ? integ.cwd : 'task',
+    testsRepoId: ids.has(integ.testsRepoId) ? integ.testsRepoId : '',
+    runWhen: integ.runWhen === 'multi' ? 'multi' : 'always',
+    timeoutMinutes: Math.min(120, Math.max(1, Number(integ.timeoutMinutes) || 20))
+  }
+}
+
+const envName = (name) => String(name).toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'REPO'
+
+function IntegrationSection({ value: v, repos, onChange }) {
+  const [open, setOpen] = useState(!!v.command)
+  const set = (k) => (e) => onChange({ [k]: e.target.value })
+  const on = !!v.command?.trim()
+  return (
+    <div className={`integration ${open ? 'open' : ''}`}>
+      <button type="button" className="integration-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={14} />
+        <span className="field-label">Integration tests</span>
+        <span className={`badge ${on ? 'done' : ''}`}>{on ? 'On' : 'Off'}</span>
+        <span className="field-hint grow">End-to-end tests across repos, after each repo's own tests pass.</span>
+      </button>
+      {open && (
+        <div className="integration-body">
+          <Field label="Command" hint="Leave blank to turn integration tests off. Must exit 0 for a task to complete.">
+            <input className="mono" value={v.command || ''} onChange={set('command')} placeholder="npx playwright test" />
+          </Field>
+          <div className="grid-2">
+            <Field label="Before" hint="Optional. Runs first, every time (start services, build).">
+              <input className="mono" value={v.beforeCommand || ''} onChange={set('beforeCommand')} placeholder="docker compose up -d --build" />
+            </Field>
+            <Field label="After" hint="Optional. Always runs, even if tests fail (clean up).">
+              <input className="mono" value={v.afterCommand || ''} onChange={set('afterCommand')} placeholder="docker compose down" />
+            </Field>
+          </div>
+          <div className="grid-3">
+            <Field label="Run from">
+              <select className="select" value={v.cwd || 'task'} onChange={set('cwd')}>
+                <option value="task">Task folder (all repos)</option>
+                {repos.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name || 'unnamed'} repo
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="End-to-end tests live in">
+              <select className="select" value={v.testsRepoId || ''} onChange={set('testsRepoId')}>
+                <option value="">Not specified</option>
+                {repos.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name || 'unnamed'}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Run">
+              <select className="select" value={v.runWhen || 'always'} onChange={set('runWhen')}>
+                <option value="always">For every task</option>
+                <option value="multi">Only when 2+ repos change</option>
+              </select>
+            </Field>
+          </div>
+          <Field label="Timeout (minutes)">
+            <input type="number" min={1} max={120} value={v.timeoutMinutes ?? 20} onChange={set('timeoutMinutes')} className="narrow" />
+          </Field>
+          <div className="env-help">
+            <span className="field-label">Available to these commands</span>
+            <code>KOMMIT_TASK_DIR</code> task folder · <code>KOMMIT_CHANGED_REPOS</code> changed repo names ·{' '}
+            <code>KOMMIT_VERSION</code> · <code>KOMMIT_TASK_NUMBER</code>
+            {repos.map((r) => (
+              <span key={r.id}>
+                {' · '}
+                <code>KOMMIT_REPO_{envName(r.name || 'repo')}</code>
+              </span>
+            ))}
+            <span className="field-hint">Each KOMMIT_REPO_* points at that repo's folder for the task (its worktree), so compose files and scripts can find every repo.</span>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }

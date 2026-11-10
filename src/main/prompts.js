@@ -170,7 +170,42 @@ function testSetupLines(project, ctx) {
         `- ${where}: has NO test command configured. If you change it: use its existing test setup if it has one; otherwise set one up that fits its stack, preferring lightweight tools (e.g. Vitest + Testing Library for Vite/Vue/React, node:test or Vitest with supertest for Node APIs, pytest for Python). Install dev dependencies with the package manager, add a "test" script, write the tests, and report the command in "testCommands".`
       )
   }
-  return lines.length ? `\n## Tests\n${lines.join('\n')}\n\n${TESTING_GUIDE}\n` : ''
+  return (lines.length ? `\n## Tests\n${lines.join('\n')}\n\n${TESTING_GUIDE}\n` : '') + integrationLines(project, ctx)
+}
+
+// Tell Claude about the workspace's end-to-end suite, if there is one.
+function integrationLines(project, ctx) {
+  const integ = project.integration
+  if (!integ?.command?.trim()) return ''
+  const where = integ.cwd && integ.cwd !== 'task' ? `from the "${project.repos.find((r) => r.id === integ.cwd)?.name}" repository` : 'from the task folder'
+  let s = `\n## Integration tests\nAfter every changed repository's own tests pass, the app runs the workspace integration tests ${where}: \`${integ.command}\`${
+    integ.beforeCommand?.trim() ? ` (after \`${integ.beforeCommand}\`)` : ''
+  }. They exercise the repositories together, and the task only completes if they pass.\n`
+  const home = project.repos.find((r) => r.id === integ.testsRepoId)
+  if (home) {
+    const inScope = ctx.repos.some((r) => r.id === home.id)
+    s += inScope
+      ? `End-to-end tests live in "${home.name}". When this task changes behavior that crosses repositories or a user flow, add or update end-to-end tests there.\n`
+      : `End-to-end tests live in "${home.name}", which is not part of this task, so don't edit it.\n`
+  }
+  return s
+}
+
+// Readable exit codes. Windows reports crashes as big NTSTATUS values (e.g. 3221226505 = 0xC0000409).
+export function exitLabel(code) {
+  if (typeof code === 'number' && code >= 0xc0000000) return `0x${code.toString(16).toUpperCase()} (the process crashed)`
+  return String(code)
+}
+
+export function formatIntegrationFeedback(result) {
+  const failedStep = result.beforeFailed ? `The command that prepares them (\`${result.beforeCommand}\`)` : `The command \`${result.command}\``
+  return `The workspace integration tests failed. ${failedStep} exited with code ${exitLabel(result.code)}${result.timedOut ? ' (timed out)' : ''}. Output (last part):
+
+\`\`\`
+${(result.output || '').slice(-6000)}
+\`\`\`
+
+Find the cause in the repositories you changed and fix it. If an end-to-end test needs to change because the behavior intentionally changed, update it.`
 }
 
 export function buildPrompt(task, project, ctx, feedback) {
@@ -207,6 +242,10 @@ ${diffText}
 You are the CODE REVIEWER for this change. You did not write it. Read surrounding code where you need context.
 Check that it does what the task asks, has no bugs, does not break existing behavior, and has no security problems.
 Check that new or changed behavior is covered by meaningful tests of the right kind (unit, API, security, UI, accessibility, as fits the change). Missing tests for new behavior, or tests that can't fail, are a "major" issue.${
+    project.integration?.testsRepoId && ctx.repos.some((r) => r.id === project.integration.testsRepoId) && ctx.multi
+      ? `\nBehavior that crosses repositories or forms a user flow should have an end-to-end test in "${project.repos.find((r) => r.id === project.integration.testsRepoId)?.name}" when practical. Missing one is a "minor" issue, unless the task is mainly that flow, in which case it is "major".`
+      : ''
+  }${
     ctx.multi ? '\nCheck that every repository matches the contract: the same routes, field names, types and error shapes on both sides.' : ''
   }
 Use verdict "changes_requested" only for blocker or major problems. Style nits are "minor" and should not block.
@@ -265,7 +304,7 @@ export function formatTestFeedback(failed, multi) {
   return failed
     .map(
       (r) =>
-        `${multi ? `Repository "${r.name}": ` : ''}the test command \`${r.command}\` failed (exit code ${r.code}). Output (last part):\n\n\`\`\`\n${r.output.slice(-6000)}\n\`\`\``
+        `${multi ? `Repository "${r.name}": ` : ''}the test command \`${r.command}\` failed (exit code ${exitLabel(r.code)}). Output (last part):\n\n\`\`\`\n${r.output.slice(-6000)}\n\`\`\``
     )
     .join('\n\n')
 }

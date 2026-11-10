@@ -18,13 +18,13 @@ export function killTree(child) {
  * Run a shell command (e.g. "npm test") and collect its output.
  * @returns {{ promise: Promise<{code, output, timedOut}>, stop: () => void }}
  */
-export function runShell(command, { cwd, timeoutMs = 10 * 60 * 1000, onData = () => {} } = {}) {
+export function runShell(command, { cwd, env = {}, timeoutMs = 10 * 60 * 1000, onData = () => {} } = {}) {
   const child = spawn(command, {
     cwd,
     shell: true,
     windowsHide: true,
     detached: process.platform !== 'win32',
-    env: { ...process.env, CI: 'true', FORCE_COLOR: '0' }
+    env: { ...process.env, CI: 'true', FORCE_COLOR: '0', ...env }
   })
   let stopped = false
   const promise = new Promise((resolve, reject) => {

@@ -29,6 +29,22 @@ function refPart(s) {
   )
 }
 
+// Fix attempts allowed before a task fails. 0 is valid (no retries); only a missing or bad value defaults to 3.
+export function maxAttempts(project) {
+  const n = Number(project.maxAttempts)
+  return project.maxAttempts !== '' && project.maxAttempts != null && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 3
+}
+
+// "client-view" -> "CLIENT_VIEW", for KOMMIT_REPO_<NAME> environment variables.
+export function envName(name) {
+  return (
+    String(name)
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'REPO'
+  )
+}
+
 export function scopeRepos(task, project) {
   const picked = task.repoIds?.length ? project.repos.filter((r) => task.repoIds.includes(r.id)) : []
   return picked.length ? picked : project.repos
@@ -262,7 +278,7 @@ export function createPipeline({ store, emit, worktreeRoot, deps = {} }) {
 
     const retryOrFail = (reason, feedback) => {
       const attempts = (task.attempts || 0) + 1
-      if (attempts > (Number(project.maxAttempts) || 3)) {
+      if (attempts > maxAttempts(project)) {
         throw new Error(`${reason} Gave up after ${attempts - 1} fix attempt(s).`)
       }
       log(taskId, stage, 'warn', `${reason} Sending it back to build (attempt ${attempts}).`)
@@ -456,19 +472,81 @@ export function createPipeline({ store, emit, worktreeRoot, deps = {} }) {
         if (!r.setupDone && repo.setupCommand?.trim()) {
           log(taskId, 'test', 'tool', `${repo.name}: setup: ${repo.setupCommand}`)
           const setup = await step(runShell(repo.setupCommand, { cwd: r.dir }))
-          if (setup.code !== 0) throw new Error(`${repo.name}: setup command failed (exit ${setup.code}):\n${setup.output.slice(-2000)}`)
+          if (setup.code !== 0) throw new Error(`${repo.name}: setup command failed (exit ${P.exitLabel(setup.code)}):\n${setup.output.slice(-2000)}`)
           task = update(taskId, { repos: { ...task.repos, [id]: { ...r, setupDone: true } } })
         }
         log(taskId, 'test', 'tool', `${repo.name}: ${command}`)
         const res = await step(runShell(command, { cwd: r.dir }))
         const passed = res.code === 0
         results.push({ repoId: id, name: repo.name, command, code: res.code, passed, timedOut: res.timedOut, output: res.output.slice(-20000) })
-        log(taskId, 'test', passed ? 'success' : 'error', `${repo.name}: tests ${passed ? 'passed' : `failed (exit ${res.code}${res.timedOut ? ', timed out' : ''})`}`)
+        log(taskId, 'test', passed ? 'success' : 'error', `${repo.name}: tests ${passed ? 'passed' : `failed (exit ${P.exitLabel(res.code)}${res.timedOut ? ', timed out' : ''})`}`)
       }
       const passed = results.every((r) => r.passed)
-      saveOutput('test', { passed, skipped: results.length > 0 && results.every((r) => r.skipped), repos: results })
-      if (passed) return 'docs'
-      return retryOrFail('Tests failed.', P.formatTestFeedback(results.filter((r) => !r.passed), ctx.multi))
+      const skipped = results.length > 0 && results.every((r) => r.skipped)
+      if (!passed) {
+        saveOutput('test', { passed, skipped, repos: results })
+        return retryOrFail('Tests failed.', P.formatTestFeedback(results.filter((r) => !r.passed), ctx.multi))
+      }
+
+      // 4. Workspace integration tests: the repos exercised together.
+      const integration = await runIntegration(affected)
+      saveOutput('test', { passed: !integration || integration.passed, skipped, repos: results, integration })
+      if (!integration || integration.passed) return 'docs'
+      return retryOrFail('Integration tests failed.', P.formatIntegrationFeedback(integration))
+    }
+
+    async function runIntegration(affected) {
+      const integ = project.integration
+      const command = integ?.command?.trim()
+      if (!command || !affected.length) return null
+      if (integ.runWhen === 'multi' && affected.length < 2) {
+        log(taskId, 'test', 'info', 'Integration tests skipped: they only run when 2 or more repos change.')
+        return { skipped: true, passed: true, command }
+      }
+
+      const runFromRepo = integ.cwd && integ.cwd !== 'task' ? integ.cwd : null
+      const cwd = runFromRepo ? task.repos[runFromRepo]?.dir || project.repos.find((r) => r.id === runFromRepo)?.path : task.cwd
+      if (!cwd || !fs.existsSync(cwd)) throw new Error(`Integration tests: the folder to run them from wasn't found (${cwd || 'not set'}).`)
+
+      // Point scripts at each repo: this task's worktree when it has one, else the repo itself.
+      const version = project.versions?.find((v) => v.id === task.versionId)
+      const env = {
+        KOMMIT_TASK_DIR: task.cwd,
+        KOMMIT_TASK_NUMBER: String(task.number),
+        KOMMIT_VERSION: version?.name || '',
+        KOMMIT_CHANGED_REPOS: affected.map(repoName).join(',')
+      }
+      for (const repo of project.repos) env[`KOMMIT_REPO_${envName(repo.name)}`] = task.repos[repo.id]?.dir || repo.path
+
+      const timeoutMs = (Number(integ.timeoutMinutes) || 20) * 60 * 1000
+      const run = (cmd) => step(runShell(cmd, { cwd, env, timeoutMs }))
+      const started = Date.now()
+      const result = { command, beforeCommand: integ.beforeCommand?.trim() || '', passed: false, code: null, output: '' }
+      try {
+        if (result.beforeCommand) {
+          log(taskId, 'test', 'tool', `integration (before): ${result.beforeCommand}`)
+          const before = await run(result.beforeCommand)
+          if (before.code !== 0) {
+            Object.assign(result, { beforeFailed: true, code: before.code, timedOut: before.timedOut, output: before.output.slice(-20000) })
+            log(taskId, 'test', 'error', `Integration setup failed (exit ${P.exitLabel(before.code)})`)
+            return result
+          }
+        }
+        log(taskId, 'test', 'tool', `integration: ${command}`)
+        const res = await run(command)
+        Object.assign(result, { code: res.code, passed: res.code === 0, timedOut: res.timedOut, output: res.output.slice(-20000) })
+        log(taskId, 'test', result.passed ? 'success' : 'error', `Integration tests ${result.passed ? 'passed' : `failed (exit ${P.exitLabel(res.code)}${res.timedOut ? ', timed out' : ''})`}`)
+        return result
+      } finally {
+        result.durationMs = Date.now() - started
+        const after = integ.afterCommand?.trim()
+        // Always clean up (containers, servers), even after a failure. Not stoppable on purpose.
+        if (after) {
+          log(taskId, 'test', 'tool', `integration (after): ${after}`)
+          const done = await runShell(after, { cwd, env, timeoutMs: 5 * 60 * 1000 }).promise.catch((e) => ({ code: -1, output: e.message }))
+          if (done.code !== 0) log(taskId, 'test', 'warn', `Integration cleanup exited with ${done.code}`)
+        }
+      }
     }
   }
 
