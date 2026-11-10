@@ -170,6 +170,22 @@ npm run dev
 | `npm run build` | Build main, preload and renderer bundles into `out/` |
 | `npm start` | Preview the production build |
 | `npm test` | Run the pipeline test suite |
+| `npm run dist` | Build the Windows installer, `dist/Kommit-Setup-<version>.exe` |
+| `npm run dist:dir` | Build an unpacked app folder only (`dist/win-unpacked/Kommit.exe`), with no installer |
+
+### Install as a desktop app (Windows)
+
+```bash
+npm run dist
+```
+
+Run `dist/Kommit-Setup-0.1.0.exe`. It installs for your user account only, with no admin rights needed, and adds **Kommit** to the desktop and Start menu. Uninstall it from *Settings → Apps*. Your data in `%APPDATA%\Kommit` is kept.
+
+Notes:
+- The installer isn't code-signed, so Windows SmartScreen may warn you the first time you run a copy downloaded from elsewhere. Choose *More info → Run anyway*.
+- The installed app and `npm run dev` share the same data, and only one can run at a time. Opening Kommit again just focuses the open window.
+- The app finds `claude` on your PATH or in `~/.local/bin`. If it's somewhere else, set its path in Settings.
+- `mac` (dmg) and `linux` (AppImage) targets are configured, but they must be built on those platforms (`npx electron-builder --mac` or `--linux`) and are untested.
 
 ## Using Kommit
 
@@ -324,9 +340,9 @@ Every Claude stage is a Claude Code session, billed to whatever account `claude`
 
 ## Limitations and roadmap
 
-- No installer yet. Run from source (`npm run dev` or `npm start`).
+- The Windows installer is unsigned, and there's no auto-update yet. Rebuild and reinstall to update.
 - Pushing branches and opening pull requests is intentionally manual for now.
-- Possible next steps: PR creation, an integration-test command per workspace, per-stage model selection, and packaged builds.
+- Possible next steps: PR creation, an integration-test command per workspace, per-stage model selection, code signing and auto-update.
 
 ## License
 

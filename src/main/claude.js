@@ -1,7 +1,37 @@
 // Runs the Claude Code CLI headless (`claude -p`) and turns its stream-json
 // output into simple log entries. Uses whatever login `claude` already has.
 import { spawn } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { killTree } from './proc.js'
+
+// Find the Claude Code CLI. Apps opened from the desktop don't always get the same
+// PATH as a terminal, so after PATH we also check the usual install locations.
+let resolved = null
+export function resolveClaudePath(configured) {
+  if (configured && configured.trim() && configured.trim() !== 'claude') return configured.trim()
+  if (resolved) return resolved
+  const names = process.platform === 'win32' ? ['claude.exe'] : ['claude']
+  const dirs = [
+    ...(process.env.PATH || '').split(path.delimiter).filter(Boolean),
+    path.join(os.homedir(), '.local', 'bin'),
+    path.join(os.homedir(), '.claude', 'local'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin'
+  ]
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidate = path.join(dir, name)
+      try {
+        if (fs.statSync(candidate).isFile()) return (resolved = candidate)
+      } catch {
+        // not here
+      }
+    }
+  }
+  return 'claude' // let spawn try; it reports a clear error if missing
+}
 
 function shorten(s, n = 160) {
   s = String(s ?? '').replace(/\s+/g, ' ').trim()
@@ -88,6 +118,7 @@ export function runClaude({
   delete env.CLAUDECODE
   delete env.CLAUDE_CODE_ENTRYPOINT
 
+  claudePath = resolveClaudePath(claudePath)
   const child = spawn(claudePath, args, { cwd, env, windowsHide: true })
   let stopped = false
 

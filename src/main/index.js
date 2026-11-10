@@ -11,6 +11,17 @@ let win = null
 let store
 let pipeline
 
+// One Kommit at a time: a second launch (e.g. double-clicking the desktop icon again)
+// focuses the open window instead of starting another copy on the same data.
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) app.quit()
+app.on('second-instance', () => {
+  if (!win || win.isDestroyed()) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+})
+
 function emit(channel, ...args) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args)
   if (channel === 'task:updated') notify(args[0])
@@ -35,6 +46,8 @@ function createWindow() {
     title: 'Kommit',
     backgroundColor: '#111214',
     autoHideMenuBar: true,
+    // Packaged builds use the icon baked into Kommit.exe; in dev, use the source PNG.
+    ...(app.isPackaged ? {} : { icon: path.join(__dirname, '../../build/icon.png') }),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -149,6 +162,7 @@ function carryOverOldData(dataDir) {
 }
 
 app.whenReady().then(() => {
+  if (!gotLock) return
   app.setAppUserModelId('dev.kommit.app')
   const dataDir = app.getPath('userData')
   try {
